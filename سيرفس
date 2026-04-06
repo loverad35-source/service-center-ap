@@ -1,0 +1,190 @@
+Set WinScriptHost = CreateObject("WScript.Shell")
+WinScriptHost.CurrentDirectory = "C:\Users\ROYAL 2\Desktop\my_web_app"
+WinScriptHost.Run "python -m streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false", 0
+import streamlit as st
+import sqlite3
+import pandas as pd
+from datetime import datetime
+import os
+
+# --- إعدادات الصفحة ---
+st.set_page_config(page_title="مركز سيرفس - نظام الويب", layout="wide", initial_sidebar_state="expanded")
+
+# --- دالة الاتصال بقاعدة البيانات ---
+def get_db_connection():
+    conn = sqlite3.connect('service_center_v3.db', check_same_thread=False)
+    return conn
+
+# --- إنشاء الجداول إذا لم تكن موجودة ---
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, price REAL, cost REAL, stock INTEGER)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS sales (id INTEGER PRIMARY KEY AUTOINCREMENT, item_name TEXT, amount REAL, cost REAL, profit REAL, seller TEXT, date TEXT)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, role TEXT)')
+    
+    # حسابات افتراضية
+    cursor.execute("SELECT COUNT(*) FROM users")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO users VALUES ('admin', '1234', 'manager')")
+        cursor.execute("INSERT INTO users VALUES ('user1', '0000', 'staff')")
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- إدارة الجلسة (Session State) ---
+if 'auth' not in st.session_state:
+    st.session_state.auth = False
+    st.session_state.user = ""
+    st.session_state.role = ""
+if 'cart' not in st.session_state:
+    st.session_state.cart = []
+
+# --- شاشة تسجيل الدخول ---
+if not st.session_state.auth:
+    st.markdown("<h1 style='text-align: center;'>مركز سيرفس - نظام الويب 🚗</h1>", unsafe_allow_html=True)
+    with st.container():
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.subheader("تسجيل الدخول")
+            user_input = st.text_input("اسم المستخدم")
+            pass_input = st.text_input("كلمة المرور", type="password")
+            if st.button("دخول", use_container_width=True):
+                conn = get_db_connection()
+                res = conn.execute("SELECT role FROM users WHERE username=? AND password=?", (user_input, pass_input)).fetchone()
+                conn.close()
+                if res:
+                    st.session_state.auth = True
+                    st.session_state.user = user_input
+                    st.session_state.role = res[0]
+                    st.rerun()
+                else:
+                    st.error("بيانات الدخول خاطئة!")
+else:
+    # --- القائمة الجانبية ---
+    st.sidebar.title(f"👤 {st.session_state.user}")
+    st.sidebar.write(f"الرتبة: {st.session_state.role}")
+    
+    menu = ["🛒 واجهة البيع", "📦 المخزن", "📊 التقارير"]
+    if st.session_state.role == "manager":
+        menu.append("👥 المستخدمين")
+    
+    choice = st.sidebar.radio("انتقل إلى:", menu)
+    
+    if st.sidebar.button("تسجيل الخروج"):
+        st.session_state.auth = False
+        st.rerun()
+
+    # --- 1. واجهة البيع (POS) ---
+    if choice == "🛒 واجهة البيع":
+        st.title("🛒 واجهة البيع السريع")
+        conn = get_db_connection()
+        products = pd.read_sql_query("SELECT * FROM products", conn)
+        conn.close()
+
+        col_prods, col_cart = st.columns([2, 1])
+
+        with col_prods:
+            st.subheader("المنتجات المتوفرة")
+            # عرض المنتجات كأزرار
+            grid_cols = st.columns(3)
+            for i, row in products.iterrows():
+                with grid_cols[i % 3]:
+                    if row['stock'] > 0:
+                        if st.button(f"{row['name']}\n{int(row['price']):,} د.ع", key=f"btn_{row['id']}"):
+                            st.session_state.cart.append({'id': row['id'], 'name': row['name'], 'price': row['price'], 'cost': row['cost']})
+                    else:
+                        st.button(f"{row['name']}\nنفذ", disabled=True, key=f"btn_{row['id']}")
+
+        with col_cart:
+            st.subheader("السلة")
+            if st.session_state.cart:
+                cart_df = pd.DataFrame(st.session_state.cart)
+                st.table(cart_df[['name', 'price']])
+                total = cart_df['price'].sum()
+                st.markdown(f"### المجموع: {int(total):,} د.ع")
+                
+                if st.button("✅ إتمام البيع", use_container_width=True):
+                    conn = get_db_connection()
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    for item in st.session_state.cart:
+                        profit = item['price'] - item['cost']
+                        conn.execute("INSERT INTO sales (item_name, amount, cost, profit, seller, date) VALUES (?, ?, ?, ?, ?, ?)", 
+                                     (item['name'], item['price'], item['cost'], profit, st.session_state.user, now))
+                        conn.execute("UPDATE products SET stock = stock - 1 WHERE id = ?", (item['id'],))
+                    conn.commit()
+                    conn.close()
+                    st.session_state.cart = []
+                    st.success("تمت العملية بنجاح!")
+                    st.rerun()
+                
+                if st.button("🗑️ تفريغ السلة", type="secondary"):
+                    st.session_state.cart = []
+                    st.rerun()
+            else:
+                st.info("السلة فارغة")
+
+    # --- 2. إدارة المخزن ---
+    elif choice == "📦 المخزن":
+        st.title("📦 إدارة المخزون")
+        conn = get_db_connection()
+        
+        # إضافة منتج جديد (Expansion)
+        with st.expander("➕ إضافة منتج جديد"):
+            n = st.text_input("الاسم")
+            p = st.number_input("سعر البيع", min_value=0.0)
+            c = st.number_input("سعر الكلفة", min_value=0.0)
+            s = st.number_input("الكمية", min_value=0)
+            if st.button("حفظ المنتج"):
+                conn.execute("INSERT INTO products (name, price, cost, stock) VALUES (?, ?, ?, ?)", (n, p, c, s))
+                conn.commit()
+                st.success("تم الحفظ")
+                st.rerun()
+
+        # عرض وتعديل البيانات
+        df_inv = pd.read_sql_query("SELECT * FROM products", conn)
+        edited_df = st.data_editor(df_inv, num_rows="dynamic", key="inv_editor")
+        
+        if st.button("💾 حفظ التعديلات في الجدول"):
+            # ملاحظة: في النسخ المتقدمة نحدث الصفوف المعدلة فقط
+            for i, row in edited_df.iterrows():
+                conn.execute("UPDATE products SET name=?, price=?, cost=?, stock=? WHERE id=?", 
+                             (row['name'], row['price'], row['cost'], row['stock'], row['id']))
+            conn.commit()
+            st.success("تم تحديث المخزن")
+        conn.close()
+
+    # --- 3. التقارير ---
+    elif choice == "📊 التقارير":
+        st.title("📊 التقارير المالية")
+        conn = get_db_connection()
+        sales_df = pd.read_sql_query("SELECT * FROM sales", conn)
+        conn.close()
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("إجمالي المبيعات", f"{int(sales_df['amount'].sum()):,} د.ع")
+        col2.metric("صافي الأرباح", f"{int(sales_df['profit'].sum()):,} د.ع", delta_color="normal")
+        col3.metric("عدد العمليات", len(sales_df))
+        
+        st.subheader("سجل المبيعات الأخير")
+        st.dataframe(sales_df.sort_values(by="date", ascending=False))
+
+    # --- 4. المستخدمين (مدير فقط) ---
+    elif choice == "👥 المستخدمين":
+        st.title("👥 إدارة الموظفين")
+        conn = get_db_connection()
+        users_df = pd.read_sql_query("SELECT * FROM users", conn)
+        st.table(users_df)
+        
+        with st.form("add_user"):
+            new_u = st.text_input("اسم المستخدم الجديد")
+            new_p = st.text_input("كلمة المرور")
+            new_r = st.selectbox("الصلاحية", ["staff", "manager"])
+            if st.form_submit_button("إضافة موظف"):
+                conn.execute("INSERT INTO users VALUES (?, ?, ?)", (new_u, new_p, new_r))
+                conn.commit()
+                st.rerun()
+        conn.close()
+streamlit
+pandas
