@@ -1,6 +1,3 @@
-Set WinScriptHost = CreateObject("WScript.Shell")
-WinScriptHost.CurrentDirectory = "C:\Users\ROYAL 2\Desktop\my_web_app"
-WinScriptHost.Run "python -m streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false", 0
 import streamlit as st
 import sqlite3
 import pandas as pd
